@@ -1,4 +1,3 @@
-
 # outil_maillage_seo.py
 
 import streamlit as st
@@ -57,8 +56,9 @@ def extract_internal_links(url, domain):
 def get_embedding(text):
     return model.encode(text, convert_to_tensor=True)
 
-# Fonction pour suggérer des liens sémantiques
-def suggest_links(df, seuil, exclusion):
+# Fonction principale de suggestion de liens
+
+def suggest_links(df, seuil, exclusion, prioritaires):
     embeddings = []
     contenus = []
     urls = df['URL'].tolist()
@@ -76,15 +76,33 @@ def suggest_links(df, seuil, exclusion):
             continue
         liens_existants = extract_internal_links(url_source, domaines[i])
         scored_links = []
+
         for j, emb_cible in enumerate(embeddings):
             if i == j:
                 continue
+            url_cible = urls[j]
+            if url_cible in liens_existants:
+                continue
             score = float(util.cos_sim(emb_source, emb_cible))
-            if score >= seuil and urls[j] not in liens_existants:
-                scored_links.append((urls[j], score, generate_anchor_from_text(contenus[j])))
-        # Trier et limiter à 5 suggestions par page
-        scored_links = sorted(scored_links, key=lambda x: x[1], reverse=True)[:5]
-        for url_cible, score, ancre in scored_links:
+
+            # Bonus si l'URL cible contient un mot prioritaire
+            bonus = 0.05 if any(p in url_cible for p in prioritaires) else 0
+            score += bonus
+
+            ancre = generate_anchor_from_text(contenus[j])
+            scored_links.append((url_cible, score, ancre))
+
+        # Si moins de 4 liens > seuil, compléter avec meilleurs liens restants
+        scored_links = sorted(scored_links, key=lambda x: x[1], reverse=True)
+        top_links = [l for l in scored_links if l[1] >= seuil][:6]
+
+        if len(top_links) < 4:
+            restantes = [l for l in scored_links if l not in top_links]
+            top_links += restantes[:(4 - len(top_links))]
+
+        top_links = top_links[:6]  # max 6 liens
+
+        for url_cible, score, ancre in top_links:
             suggestions.append({
                 'URL source': url_source,
                 'URL cible': url_cible,
@@ -93,10 +111,11 @@ def suggest_links(df, seuil, exclusion):
             })
     return pd.DataFrame(suggestions)
 
-# Fonction pour générer une ancre possible à partir du texte de la page cible
+# Génération d'une ancre optimisée SEO via TF-IDF
+
 def generate_anchor_from_text(text, max_words=5):
     try:
-        vectorizer = TfidfVectorizer(max_df=0.8, stop_words='french')
+        vectorizer = TfidfVectorizer(max_df=0.85, stop_words='french')
         X = vectorizer.fit_transform([text])
         scores = zip(vectorizer.get_feature_names_out(), X.toarray()[0])
         sorted_scores = sorted(scores, key=lambda x: x[1], reverse=True)
@@ -112,7 +131,8 @@ Cet outil analyse le contenu de vos pages et propose automatiquement des **liens
 
 - Téléchargez un fichier CSV contenant une colonne `URL` avec les pages à enrichir.
 - L’outil ne proposera **que des liens qui n’existent pas déjà** dans le code HTML.
-- Export final au format CSV avec suggestions de liens et ancres.
+- Chaque page recevra entre 4 et 6 suggestions de liens.
+- Les pages contenant certains mots-clés seront privilégiées si vous le souhaitez.
 """)
 
 uploaded_file = st.file_uploader("📥 Charger votre fichier CSV avec les URLs", type=["csv"])
@@ -125,9 +145,12 @@ if uploaded_file:
     exclusion_input = st.text_area("Exclure les URLs contenant ces mots (séparés par des virgules)", value="contact,mentions")
     exclusion_terms = [e.strip() for e in exclusion_input.split(',') if e.strip() != '']
 
+    prioritaire_input = st.text_area("Favoriser les URLs contenant ces mots (répertoires ou termes séparés par des virgules)", value="")
+    mots_prioritaires = [p.strip() for p in prioritaire_input.split(',') if p.strip() != '']
+
     if st.button("🚀 Lancer l'analyse sémantique"):
         with st.spinner("Traitement en cours... Cela peut prendre quelques minutes."):
-            results = suggest_links(df_urls, seuil, exclusion_terms)
+            results = suggest_links(df_urls, seuil, exclusion_terms, mots_prioritaires)
         st.success("Analyse terminée ✅")
 
         st.dataframe(results)
